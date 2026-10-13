@@ -1,0 +1,327 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Auth & RBAC ----------
+
+enum RoleCode {
+  ADMIN
+  OWNER
+  OPERATOR
+  WAREHOUSE
+  FINANCE
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  name         String
+  isActive     Boolean    @default(true)
+  deletedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  userRoles    UserRole[]
+
+  @@index([isActive]) // 用户列表按状态过滤
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  code        RoleCode         @unique
+  name        String
+  description String?
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id    String           @id @default(cuid())
+  code  String           @unique
+  name  String
+  type  String // MENU | API | BUTTON
+  roles RolePermission[]
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now())
+
+  @@id([userId, roleId])
+  @@index([roleId]) // 按角色查用户
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// ---------- Store & Product ----------
+
+enum StoreSite {
+  US
+  EU
+  JP
+  CA
+}
+
+enum SyncStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+model Store {
+  id           String     @id @default(cuid())
+  name         String
+  site         StoreSite
+  marketplaceId String
+  sellerId     String     @unique
+  currency     String     @default("USD")
+  apiStatus    SyncStatus @default(CONNECTED)
+  lastSyncedAt DateTime?
+  products     Product[]
+  orders       Order[]
+  campaigns    AdCampaign[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model Product {
+  id           String   @id @default(cuid())
+  storeId      String
+  store        Store    @relation(fields: [storeId], references: [id])
+  sku          String
+  asin         String
+  fnsku        String
+  title        String
+  imageUrl     String?
+  category     String
+  brand        String
+  costPrice    Decimal  @db.Decimal(12, 4)
+  salePrice    Decimal  @db.Decimal(12, 4)
+  weightGrams  Int
+  lengthMm     Int?
+  widthMm      Int?
+  heightMm     Int?
+  status       String   @default("ACTIVE") // ACTIVE | INACTIVE | DELETED
+  deletedAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  listing        Listing?
+  inventories    Inventory[]
+  orderItems     OrderItem[]
+  profitSnapshots ProfitSnapshot[]
+
+  @@unique([storeId, sku]) // 同店铺 SKU 唯一
+  @@index([asin]) // ASIN 搜索
+  @@index([storeId, status]) // 店铺商品列表页
+}
+
+model Listing {
+  id          String  @id @default(cuid())
+  productId   String  @unique
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  title       String
+  bullets     Json
+  description String
+  searchTerms String
+  keywords    Json?
+
+  @@index([productId]) // 详情页联查
+}
+
+// ---------- Inventory ----------
+
+enum WarehouseType {
+  FBA
+  OVERSEAS
+  DOMESTIC
+}
+
+enum InventoryStatus {
+  NORMAL
+  LOW_STOCK
+  OUT_OF_STOCK_RISK
+  SLOW_MOVING
+}
+
+enum MovementType {
+  IN
+  OUT
+  TRANSFER
+}
+
+model Inventory {
+  id            String          @id @default(cuid())
+  productId     String
+  product       Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouseType WarehouseType
+  quantity      Int             @default(0)
+  safetyStock   Int             @default(0)
+  status        InventoryStatus @default(NORMAL)
+  movements     InventoryMovement[]
+
+  @@unique([productId, warehouseType]) // 一个商品每仓一条记录
+}
+
+model InventoryMovement {
+  id          String      @id @default(cuid())
+  inventoryId String
+  inventory   Inventory   @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  type        MovementType
+  quantity    Int
+  reference   String?
+  note        String?
+  createdAt   DateTime    @default(now())
+
+  @@index([inventoryId, createdAt]) // 库存流水查询
+}
+
+// ---------- Order ----------
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  IN_TRANSIT
+  COMPLETED
+  REFUNDED
+}
+
+enum OrderChannel {
+  FBA
+  FBM
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  storeId        String
+  store          Store       @relation(fields: [storeId], references: [id])
+  amazonOrderId  String      @unique
+  channel        OrderChannel
+  status         OrderStatus
+  totalAmount    Decimal     @db.Decimal(12, 4)
+  currency       String      @default("USD")
+  buyerName      String
+  buyerCity      String?
+  itemCount      Int
+  shippedAt      DateTime?
+  createdAt      DateTime    @default(now())
+  items          OrderItem[]
+
+  @@index([storeId, createdAt]) // 订单列表页主查询
+  @@index([status]) // 状态筛选
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  unitPrice Decimal @db.Decimal(12, 4)
+
+  @@index([orderId]) // 订单详情
+  @@index([productId]) // 商品销量统计
+}
+
+// ---------- Finance ----------
+
+model ProfitSnapshot {
+  id             String  @id @default(cuid())
+  productId      String
+  product        Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  storeId        String
+  date           DateTime // 按日截断
+  revenue        Decimal @db.Decimal(12, 4)
+  productCost    Decimal @db.Decimal(12, 4)
+  commission     Decimal @db.Decimal(12, 4)
+  fbaFee         Decimal @db.Decimal(12, 4)
+  adSpend        Decimal @db.Decimal(12, 4)
+  logisticsCost  Decimal @db.Decimal(12, 4)
+  netProfit      Decimal @db.Decimal(12, 4)
+
+  @@unique([productId, date])
+  @@index([storeId, date]) // 财务报表按店铺+日期聚合
+}
+
+// ---------- Advertising (P1) ----------
+
+enum CampaignType {
+  SP
+  SB
+  SD
+}
+
+enum CampaignStatus {
+  ENABLED
+  PAUSED
+}
+
+enum MatchType {
+  EXACT
+  PHRASE
+  BROAD
+}
+
+model AdCampaign {
+  id          String         @id @default(cuid())
+  storeId     String
+  store       Store          @relation(fields: [storeId], references: [id])
+  name        String
+  type        CampaignType
+  status      CampaignStatus @default(ENABLED)
+  dailyBudget Decimal        @db.Decimal(10, 2)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  metrics     AdMetric[]
+  keywords    AdKeyword[]
+
+  @@index([storeId, status]) // 店铺活动列表
+}
+
+model AdMetric {
+  id         String     @id @default(cuid())
+  campaignId String
+  campaign   AdCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  date       DateTime // 按日截断
+  impressions Int
+  clicks     Int
+  spend      Decimal   @db.Decimal(12, 4)
+  sales      Decimal   @db.Decimal(12, 4)
+  orders     Int
+
+  @@unique([campaignId, date]) // 每活动每日一条
+  @@index([campaignId, date])
+}
+
+/// 关键词近 30 天聚合报表（反范式：为避免关键词×日期的行数膨胀，按 30 天窗口聚合存储）
+model AdKeyword {
+  id         String     @id @default(cuid())
+  campaignId String
+  campaign   AdCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  keyword    String
+  matchType  MatchType
+  impressions Int
+  clicks     Int
+  spend      Decimal   @db.Decimal(12, 4)
+  sales      Decimal   @db.Decimal(12, 4)
+
+  @@unique([campaignId, keyword, matchType])
+  @@index([campaignId]) // 活动详情联查
+}
